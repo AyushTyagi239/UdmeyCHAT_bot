@@ -1,0 +1,69 @@
+# imports
+
+import requests
+from bs4 import BeautifulSoup
+from IPython.display import Markdown, display
+
+
+
+import gradio as gr
+
+
+
+
+#Load environment variables in a file called .env 
+from dotenv import load_dotenv
+import os
+from openai import OpenAI
+load_dotenv()
+print("API KEY:", os.getenv("OPENAI_API_KEY")[:10] + "...")  # hide full key
+print("BASE URL:", os.getenv("OPENAI_BASE_URL"))
+os.environ['API_KEY']= os.getenv('API_KEY','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')
+
+
+
+
+client = OpenAI(
+    api_key=os.getenv("OPENAI_API_KEY"),
+    base_url=os.getenv("OPENAI_BASE_URL")
+)
+
+
+
+
+# Constants
+openai= OpenAI()
+
+
+# A generic system message 
+system_message = "Assistant created by Ayush"
+
+
+
+# System instruction for the assistant
+system_message = "You are a helpful AI assistant."
+
+def message_gpt(prompt):
+    # Build the conversation messages
+    messages = [
+        {"role": "system", "content": system_message},
+        {"role": "user", "content": prompt}
+    ]
+
+    # Send request to NVIDIA API (through OpenAI client)
+    completion = client.chat.completions.create(
+        model="qwen/qwen3-next-80b-a3b-thinking",  # NVIDIA-supported model
+        messages=messages,
+        temperature=0.6,
+        top_p=0.7,
+        max_tokens=4096,
+        stream=True,   # stream=True gives chunks
+    )
+
+    # Collect the streamed response
+    final_response = ""
+    for chunk in completion:
+        if chunk.choices[0].delta.content:
+            final_response += chunk.choices[0].delta.content
+
+    return final_response
