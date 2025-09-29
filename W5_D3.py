@@ -152,3 +152,38 @@ fig.update_layout(
 )
 
 fig.show()
+
+
+# create a new Chat with OpenAI
+llm = ChatOpenAI(temperature=0.7, model_name=MODEL)
+
+# set up the conversation memory for the chat
+memory = ConversationBufferMemory(memory_key='chat_history', return_messages=True)
+
+# the retriever is an abstraction over the VectorStore that will be used during RAG
+retriever = vectorstore.as_retriever()
+
+# putting it together: set up the conversation chain with the GPT 4o-mini LLM, the vector store and memory
+conversation_chain = ConversationalRetrievalChain.from_llm(llm=llm, retriever=retriever, memory=memory)
+
+
+query = "Can you describe Insurellm in a few sentences"
+result = conversation_chain.invoke({"question":query})
+print(result["answer"])
+
+
+# set up a new conversation memory for the chat
+memory = ConversationBufferMemory(memory_key='chat_history', return_messages=True)
+
+# putting it together: set up the conversation chain with the GPT 4o-mini LLM, the vector store and memory
+conversation_chain = ConversationalRetrievalChain.from_llm(llm=llm, retriever=retriever, memory=memory)
+
+# Wrapping in a function - note that history isn't used, as the memory is in the conversation_chain
+
+def chat(message, history):
+    result = conversation_chain.invoke({"question": message})
+    return result["answer"]
+
+# And in Gradio:
+
+view = gr.ChatInterface(chat, type="messages").launch(inbrowser=True)
