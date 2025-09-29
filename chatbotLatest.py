@@ -8,6 +8,9 @@ from langchain.document_loaders import DirectoryLoader, TextLoader
 from langchain.text_splitter import CharacterTextSplitter
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_openai import ChatOpenAI
+from langchain.memory import ConversationBufferMemory
+from langchain.chains import ConversationalRetrievalChain
 from openai import OpenAI
 import numpy as np
 from sklearn.manifold import TSNE
@@ -149,13 +152,35 @@ except Exception as e:
     print(f"⚠️ Visualization failed: {e}")
     print("Continuing with chatbot setup...")
 
+# ========== SETUP CONVERSATIONAL CHAIN ==========
+print("🔄 Setting up conversational chain with memory...")
+
+# Create LLM
+llm = ChatOpenAI(temperature=0.7, model_name=MODEL)
+
+# Set up the conversation memory for the chat
+memory = ConversationBufferMemory(memory_key='chat_history', return_messages=True)
+
+# The retriever is an abstraction over the VectorStore that will be used during RAG
+retriever = vectorstore.as_retriever()
+
+# Putting it together: set up the conversation chain with the LLM, the vector store and memory
+conversation_chain = ConversationalRetrievalChain.from_llm(
+    llm=llm, 
+    retriever=retriever, 
+    memory=memory,
+    return_source_documents=True
+)
+
+print("✅ Conversational chain with memory created!")
+
 # ========== CHAT SYSTEM SETUP ==========
 print("🔄 Setting up chat system...")
 
-# Initialize OpenAI client
+# Initialize OpenAI client for tool functionality
 openai_client = OpenAI()
 
-# System prompt
+# System prompt for tool-based chat
 system_message = (
     "You are a helpful and professional assistant for Intensity, a company providing "
     "cybersecurity, cloud, and AI solutions. "
@@ -233,14 +258,36 @@ get_service_price_tool = {
 
 tools = [get_service_price_tool]
 
-# ========== MAIN CHAT FUNCTION ==========
-def chat_with_rag(message, history):
+# ========== DUAL CHAT FUNCTIONS ==========
+def chat_with_memory(message, history):
     """
-    Enhanced chat function that uses RAG + tools
-    message: str (new user message)
-    history: list of messages in Gradio Chatbot format
+    Chat function using ConversationalRetrievalChain with built-in memory
+    This maintains conversation context across messages
     """
-    print(f"💬 User message: {message}")
+    print(f"💬 User message (with memory): {message}")
+    
+    try:
+        # Use the conversation chain with built-in memory
+        result = conversation_chain.invoke({"question": message})
+        response = result["answer"]
+        
+        # Add to Gradio history
+        history.append((message, response))
+        print(f"🤖 Assistant response (memory): {response[:100]}...")
+        return history, ""  # Clear the input box
+        
+    except Exception as e:
+        error_response = f"Sorry, I encountered an error: {str(e)}"
+        print(f"❌ Chat with memory error: {e}")
+        history.append((message, error_response))
+        return history, ""
+
+def chat_with_tools(message, history):
+    """
+    Chat function using direct OpenAI API with tool support
+    This uses the vector store for RAG but doesn't maintain conversation memory
+    """
+    print(f"💬 User message (with tools): {message}")
     
     # STEP 1: Search vector database for relevant information (RAG)
     try:
@@ -260,7 +307,7 @@ def chat_with_rag(message, history):
         }
     ]
     
-    # Add conversation history
+    # Add conversation history from Gradio
     for entry in history:
         if isinstance(entry, tuple) and len(entry) == 2:
             user_msg, assistant_msg = entry
@@ -300,17 +347,25 @@ def chat_with_rag(message, history):
 
         # Append to history and return
         history.append((message, response))
-        print(f"🤖 Assistant response: {response[:100]}...")
+        print(f"🤖 Assistant response (tools): {response[:100]}...")
         return history, ""  # Clear the input box
         
     except Exception as e:
         error_response = f"Sorry, I encountered an error: {str(e)}"
-        print(f"❌ Chat error: {e}")
+        print(f"❌ Chat with tools error: {e}")
         history.append((message, error_response))
         return history, ""
 
-# ========== GRADIO UI ==========
+# ========== GRADIO UI WITH DUAL MODES ==========
 print("🚀 Building chat interface...")
+
+# Test the conversational chain
+print("🧪 Testing conversational chain...")
+try:
+    test_result = conversation_chain.invoke({"question": "Can you describe the company services?"})
+    print(f"✅ Test successful: {test_result['answer'][:100]}...")
+except Exception as e:
+    print(f"❌ Conversational chain test failed: {e}")
 
 with gr.Blocks(theme=gr.themes.Soft()) as demo:
     gr.Markdown("""
@@ -318,16 +373,28 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
     **Your intelligent companion for company information and services**
     
     I can help you with:
-    - 📄 Answering questions from company documents
-    - 💰 Providing service pricing information
+    - 📄 Answering questions from company documents (with memory)
+    - 💰 Providing service pricing information (with tools)
     - 🔍 Finding relevant information across all departments
+    
+    *Choose your chat mode below:*
     """)
     
-    chatbot = gr.Chatbot(
-        height=500,
-        placeholder="Ask me anything about Intensity's services or company information...",
-        show_copy_button=True
-    )
+    with gr.Row():
+        with gr.Column(scale=1):
+            chat_mode = gr.Radio(
+                choices=["🧠 Chat with Memory", "🔧 Chat with Tools"],
+                value="🧠 Chat with Memory",
+                label="Chat Mode",
+                info="Memory mode maintains conversation context, Tools mode enables pricing lookup"
+            )
+        
+        with gr.Column(scale=4):
+            chatbot = gr.Chatbot(
+                height=500,
+                placeholder="Ask me anything about Intensity's services or company information...",
+                show_copy_button=True
+            )
     
     msg = gr.Textbox(
         placeholder="Type your question here...",
@@ -337,28 +404,60 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
     
     with gr.Row():
         submit = gr.Button("🚀 Send", variant="primary", scale=1)
-        clear = gr.Button("🧹 Clear Chat", scale=1)
+        clear_memory = gr.Button("🧹 Clear Memory", scale=1)
+        clear_chat = gr.Button("🗑️ Clear Chat", scale=1)
+
+    def handle_chat(message, history, mode):
+        """Route to appropriate chat function based on mode"""
+        if mode == "🧠 Chat with Memory":
+            return chat_with_memory(message, history)
+        else:  # "🔧 Chat with Tools"
+            return chat_with_tools(message, history)
+    
+    def clear_conversation_memory():
+        """Clear the conversation chain memory"""
+        global conversation_chain, memory
+        memory.clear()
+        # Recreate the chain with fresh memory
+        conversation_chain = ConversationalRetrievalChain.from_llm(
+            llm=llm, 
+            retriever=retriever, 
+            memory=memory,
+            return_source_documents=True
+        )
+        print("✅ Conversation memory cleared!")
+        return None
 
     # Handle message submission
     submit.click(
-        fn=chat_with_rag,
-        inputs=[msg, chatbot],
+        fn=handle_chat,
+        inputs=[msg, chatbot, chat_mode],
         outputs=[chatbot, msg]
     )
     
     # Allow pressing Enter to send message
     msg.submit(
-        fn=chat_with_rag,
-        inputs=[msg, chatbot],
+        fn=handle_chat,
+        inputs=[msg, chatbot, chat_mode],
         outputs=[chatbot, msg]
     )
     
-    # Clear chat history
-    clear.click(lambda: None, None, chatbot, queue=False)
+    # Clear conversation memory
+    clear_memory.click(
+        fn=clear_conversation_memory,
+        outputs=chatbot
+    )
+    
+    # Clear chat history only
+    clear_chat.click(lambda: None, None, chatbot, queue=False)
     
     gr.Markdown("""
     ---
     *Powered by LangChain • Chroma • HuggingFace • OpenAI*
+    
+    **Mode Explanation:**
+    - **Chat with Memory**: Maintains conversation context across messages, better for extended discussions
+    - **Chat with Tools**: Enables pricing lookup functionality, better for specific service inquiries
     """)
 
 # ========== APPLICATION LAUNCH ==========
